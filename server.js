@@ -6,7 +6,7 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
-const PUBLIC_DIR = path.join(__dirname, 'public');
+const PUBLIC_DIR = __dirname;
 
 if (!GOOGLE_PLACES_API_KEY) {
   console.warn('Warning: GOOGLE_PLACES_API_KEY is not set. Google Places API requests will fail.');
@@ -17,64 +17,49 @@ app.use(express.static(PUBLIC_DIR));
 
 async function fetchGoogleRestaurants(latitude, longitude, term) {
   try {
-    const requestBody = {
-      textQuery: term || 'restaurants',
-      pageSize: 10,
-      locationBias: {
-        circle: {
-          center: {
-            latitude: parseFloat(latitude),
-            longitude: parseFloat(longitude),
-          },
-          radius: 32187,
-        },
-      },
-    };
-
-    const searchResp = await fetch('https://places.googleapis.com/v1/places:searchText', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': GOOGLE_PLACES_API_KEY,
-        'X-Goog-FieldMask': 'places.displayName,places.rating,places.photos,places.formattedAddress,places.location,places.types',
-      },
-      body: JSON.stringify(requestBody),
+    const params = new URLSearchParams({
+      query: term || 'restaurants',
+      location: `${parseFloat(latitude)},${parseFloat(longitude)}`,
+      radius: '25000',
+      type: 'restaurant',
+      key: GOOGLE_PLACES_API_KEY,
     });
 
+    const searchResp = await fetch(`https://maps.googleapis.com/maps/api/place/textsearch/json?${params.toString()}`);
     const searchData = await searchResp.json();
 
-    if (!searchResp.ok) {
-      throw new Error(searchData.error?.message || 'Google Places search failed');
+    if (!searchResp.ok || searchData.status !== 'OK') {
+      const message = searchData.error_message || searchData.status || 'Google Places search failed';
+      throw new Error(message);
     }
 
-    const places = (searchData.places || []).filter((p) => (p.rating || 0) > 4.5).slice(0, 6);
+    const places = (searchData.results || [])
+      .filter((p) => (p.rating || 0) > 4.5)
+      .slice(0, 6);
 
     const restaurants = places.map((place) => {
-      const cuisine = place.types?.filter(t => t !== 'point_of_interest' && t !== 'establishment').join(', ') || 'Restaurant';
-      const photos = place.photos || [];
+      const cuisine = place.types?.filter((t) => t !== 'point_of_interest' && t !== 'establishment' && t !== 'restaurant').join(', ') || 'Restaurant';
+      const photoReference = place.photos?.[0]?.photo_reference;
+      const photoUrl = photoReference
+        ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference=${encodeURIComponent(photoReference)}&key=${GOOGLE_PLACES_API_KEY}`
+        : getFallbackImage(cuisine);
 
       const dishNames = ['Featured Dish', 'Chef Special', 'Popular Item'];
       const dishPhotos = dishNames.map((_, index) => {
-        if (photos[index + 1]?.name) {
-          return `https://places.googleapis.com/v1/${photos[index + 1].name}/media?key=${GOOGLE_PLACES_API_KEY}&max_height_px=400`;
-        }
-        return photos[0]?.name
-          ? `https://places.googleapis.com/v1/${photos[0].name}/media?key=${GOOGLE_PLACES_API_KEY}&max_height_px=400`
+        const ref = place.photos?.[index + 1]?.photo_reference || photoReference;
+        return ref
+          ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference=${encodeURIComponent(ref)}&key=${GOOGLE_PLACES_API_KEY}`
           : getFallbackImage(cuisine);
       });
 
-      const photoUrl = photos[0]?.name
-        ? `https://places.googleapis.com/v1/${photos[0].name}/media?key=${GOOGLE_PLACES_API_KEY}&max_height_px=400`
-        : getFallbackImage(cuisine);
-
       return {
-        id: place.name,
-        name: place.displayName?.text || place.name || 'Restaurant',
+        id: place.place_id || place.name,
+        name: place.name || 'Restaurant',
         cuisine,
         rating: place.rating || 0,
-        address: place.formattedAddress || 'Address not available',
-        lat: place.location?.latitude || parseFloat(latitude),
-        lng: place.location?.longitude || parseFloat(longitude),
+        address: place.formatted_address || 'Address not available',
+        lat: place.geometry?.location?.lat || parseFloat(latitude),
+        lng: place.geometry?.location?.lng || parseFloat(longitude),
         photo: photoUrl,
         dishes: dishNames.map((name, index) => ({
           name,
